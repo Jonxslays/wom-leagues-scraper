@@ -1,6 +1,6 @@
 # WOM Leagues Scraper
 
-A quick and dirty python script to run periodically scrape the hiscores and keep
+A quick and dirty python script to run periodically to scrape the hiscores and keep
 the top players updated on [WOM Trailblazer Reloaded](https://league.wiseoldman.net).
 
 ## Setup
@@ -26,7 +26,7 @@ $ pip install -r requirements.txt
 # ^ this will likely need to be `pip3` on ubuntu
 ```
 
-Read through the constants declared `main.py` in the `Configuration` section.
+Read through the constants declared in `main.py` in the `Configuration` section.
 Change any values as you see fit for development.
 
 Recommended values for production:
