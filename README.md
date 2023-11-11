@@ -14,16 +14,14 @@ an issue as I think ubuntu ships with 3.8 by default.
 Create a virtual environment and activate it
 
 ```bash
-$ python -m venv .venv
-# ^ this will likely need to be `python3` on ubuntu
+$ python3 -m venv .venv
 $ source .venv/bin/activate
 ```
 
 Install dependencies
 
 ```bash
-$ pip install -r requirements.txt
-# ^ this will likely need to be `pip3` on ubuntu
+$ pip3 install -r requirements.txt
 ```
 
 Read through the constants declared in `main.py` in the `Configuration` section.
@@ -31,18 +29,20 @@ Change any values as you see fit for development.
 
 Recommended values for production:
 
-- LOG_LEVEL: DEBUG or INFO depending if you want to log all the metric leaders.
+- LOG_LEVEL: DEBUG
 - METRIC_LIMIT: None
 - ENABLE_SEASONAL: True
 - BASE_URL: Leave this untouched
 - DELAY: 60
-- USER_AGENT: Leave this untouched
+- BROWSER_USER_AGENT: Leave this untouched
+- WOM_API_KEY: Update if you have a key
+- LEADER_GROUP_NAME: Leave this untouched
+- WOM_USER_AGENT: Update if you want
 
 Run the script
 
 ```bash
-$ python main.py
-# ^ Again, likely need to be `python3` on ubuntu
+$ python3 main.py
 ```
 
 ## License
