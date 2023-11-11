@@ -3,13 +3,14 @@
 import abc
 import asyncio
 import logging
+import secrets
 import sys
 import typing as t
 from logging.handlers import RotatingFileHandler
 
+import wom
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup, Tag
-from wom import Client, models
 
 #########################################################
 # START Configuration
@@ -37,16 +38,21 @@ DELAY: t.Final[int] = 5
 """The number of seconds to delay between requests to the hiscores."""
 
 # fmt: off
-USER_AGENT: t.Final[str] = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
-"""The User-Agent to send with requests."""
+BROWSER_USER_AGENT: t.Final[str] = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
+"""The user agent to send with requests to the hiscores."""
 # fmt: on
 
-API_KEY: t.Final[str] = ""
-"""API Key for Wise Old Man"""
+WOM_API_KEY: t.Final[t.Optional[str]] = None
+"""The optional API Key for WOM."""
 
-LEADER_GROUP_NAME: t.Final[str] = "Faab Testing"
-"""The name for the group on WOM"""
+LEADER_GROUP_NAME: t.Final[str] = f"League Leaders {secrets.token_hex(4)}"
+"""The name for the temporary group on WOM.
 
+Use secrets.token_hex to ensure the group name is not taken already.
+"""
+
+WOM_USER_AGENT: t.Final[str] = "WOM Leagues Scraper"
+"""The user agent to send with requests to the WOM API."""
 
 #########################################################
 # END Configuration
@@ -86,20 +92,6 @@ LOGGER: t.Final[logging.Logger] = setup_logging()
 
 #########################################################
 # END Logging
-#########################################################
-
-
-#########################################################
-# START WOM Client
-#########################################################
-
-client = Client()
-
-if ENABLE_SEASONAL is True: client.set_api_base_url("https://api.wiseoldman.net/league")
-else: client.set_api_base_url("https://api.wiseoldman.net/v2")
-
-#########################################################
-# END WOM Client
 #########################################################
 
 #########################################################
@@ -199,42 +191,96 @@ class NonSkillLeader(MetricLeader):
 
     def __str__(self) -> str:
         return f"{self.metric.name}: Rank {self.rank} -> {self.username} with score {self.score}"
-    
-class Group():
-    def __init__(self, name: str, members: list) -> None:
-        self._name = name
-        self._members = members
-        self._count = len(members)
-    
-    def set_group_details(self, id: int, verification_code: str):
-        self._id = id
-        self._verification_code = verification_code
 
-    def get_members(self) -> list:
-        return self._members
+
+class Group:
+    def __init__(self, client: wom.Client, details: wom.GroupDetail) -> None:
+        self._details = details
+        self._client = client
+
+    @property
+    def members(self) -> t.List[wom.GroupMembership]:
+        """The members of this group."""
+        return self._details.memberships
 
     @property
     def name(self) -> str:
-        """The group name as defined in the config"""
-        return self._name
+        """The group name."""
+        return self._details.group.name
 
     @property
     def count(self) -> int:
-        """The amount of leaders"""
-        return self._count
+        """The amount of leaders in the group."""
+        return len(self._details.memberships)
 
     @property
-    def id(self) -> id:
-        """The ID of the group on Wise Old Man"""
-        return self._id
-        
+    def id(self) -> int:
+        """The ID of the group on WOM."""
+        return self._details.group.id
+
     @property
     def verification_code(self) -> str:
-        """The verification cope of the group on Wise Old Man"""
-        return self._verification_code
+        """The verification cope of the group on WOM."""
+        return t.cast(str, self._details.verification_code)
 
     def __str__(self) -> str:
-        return f"There are a total of {self.count} leaders in the group called {self.name}"
+        return f"WOM Group {self.name} (id: {self.id}) with {self.count} members"
+
+    @classmethod
+    async def create(cls, client: wom.Client, members: t.List[MetricLeader]) -> "Group":
+        """Creates the group on WOM."""
+        LOGGER.info("Creating group")
+        result = await client.groups.create_group(
+            LEADER_GROUP_NAME, *(wom.GroupMemberFragment(m.username) for m in members)
+        )
+
+        if result.is_err:
+            LOGGER.error(result.unwrap_err())
+            raise wom.WomError("Exiting due to previous error")
+
+        group = cls(client, result.unwrap())
+        LOGGER.info(f"Created new {group}")
+        LOGGER.debug(f"Verification code: {group.verification_code}")
+        return group
+
+    async def update(self) -> None:
+        """Updates the group on WOM."""
+        LOGGER.info("Updating group members")
+        result = await self._client.groups.update_outdated_members(
+            self.id, self.verification_code
+        )
+
+        if result.is_err:
+            err = result.unwrap_err()
+
+            if "no outdated members" in err.message:
+                # If all participants are up to date WOM will return HTTP 400
+                # Any members that were previously untracked will have an update
+                # automatically run when the group is created with them as a member
+                # This is relevant because we just created this group, so we may
+                # have already sent an update request for all members at that time
+                LOGGER.info(err.message)
+                return None
+            else:
+                # Something else has gone wrong
+                # We don't raise an error here so the group still gets deleted
+                LOGGER.error(err)
+                return None
+
+        LOGGER.info(result.unwrap().message)
+
+    async def delete(self) -> None:
+        """Deletes the group from WOM."""
+        LOGGER.info("Deleting group")
+        result = await self._client.groups.delete_group(self.id, self.verification_code)
+
+        if result.is_err:
+            LOGGER.error(result.unwrap_err())
+            raise wom.WomError(
+                f"Group deletion failed, investigate group id: {self.id}"
+            )
+
+        LOGGER.info(f"Group deleted successfully")
 
 
 #########################################################
@@ -444,57 +490,8 @@ async def fetch_leaders(session: ClientSession, metric: Metric) -> t.List[Metric
     # Parse and return the metric leaders
     return parse_leaders(metric, rows)
 
-async def createGroup(members: list) -> Group:
-    group = Group(LEADER_GROUP_NAME, members)
-    LOGGER.debug(f"Group object created with {group.count} members")
-    members = group.get_members()
-    member_fragments = [models.GroupMemberFragment(username, None) for username in members]
-    try:
-        result = await client.groups.create_group(group.name, *member_fragments)
-    except result.is_err is True:
-        error = result.unwrap_err()
-        LOGGER.error(error)
-        raise ConnectionError("Something went wrong creating the group on Wise Old man, see error above")
-    else:
-        wom_group = result.unwrap()
-        group.set_group_details(wom_group.group.id, wom_group.verification_code)
-        LOGGER.info(f"Group created on Wise Old Man with ID {group.id}")
-        LOGGER.debug(f"Verification code: {group.verification_code}")
-    return group
-    
-async def updateGroup(group: Group) -> None:
-    if hasattr(group, '_verification_code') is False or hasattr(group, '_id') is False:
-        LOGGER.error("This group doesn't exist on Wise Old Man!")
-    else:
-        result = await client.groups.update_outdated_members(group.id, group.verification_code)
-        if result.is_err is True:
-            error = result.unwrap_err()
-            LOGGER.error("Something went wrong updating the group members, see error below")
-            LOGGER.error(error)
-        else:
-            http_result = result.unwrap()
-            LOGGER.debug(f"{http_result.status}: {http_result.message}")
-            LOGGER.info("All outdated group members have been added to the update queue")
 
-async def deleteGroup(group: Group) -> None:
-    if hasattr(group, '_verification_code') is False or hasattr(group, '_id') is False:
-        LOGGER.error("This group doesn't exist on Wise Old Man!")
-    else: 
-        result = await client.groups.delete_group(group.id, group.verification_code)
-        if result.is_err is True:
-            error = result.unwrap_err()
-            LOGGER.error("Something went wrong deleting the group, see error below")
-            LOGGER.error(error)
-        else:
-            http_result = result.unwrap()
-            LOGGER.debug(f"{http_result.status}: {http_result.message}")
-            LOGGER.info("The group has been deleted")
-    
-async def main() -> None:
-    await client.start()
-    LOGGER.info("*" * 64)
-    LOGGER.info("WOM Leagues Scraper starting...")
-    session = ClientSession(headers={"User-Agent": USER_AGENT})
+async def fetch_all_leaders(session: ClientSession) -> t.List[MetricLeader]:
     metric_limit = METRIC_LIMIT if METRIC_LIMIT else len(METRICS)
     metric_leaders: t.List[MetricLeader] = []
     is_unique: t.Callable[[MetricLeader], bool] = lambda l: not any(
@@ -506,6 +503,7 @@ async def main() -> None:
         LOGGER.info(f"Fetching leaders for {metric}")
 
         try:
+            # Fetch leaders in this metric
             leaders = await fetch_leaders(session, metric)
             LOGGER.info(f"Found {len(leaders)} leaders for {metric}")
 
@@ -513,6 +511,7 @@ async def main() -> None:
                 for leader in leaders:
                     LOGGER.debug(leader)
 
+            # Filter out players we have already seen
             leaders = list(filter(is_unique, leaders))
             LOGGER.info(f"Of those, {len(leaders)} were unique")
 
@@ -526,22 +525,47 @@ async def main() -> None:
                 LOGGER.info(f"Sleeping for {DELAY} seconds...")
                 await asyncio.sleep(DELAY)
 
-
-    # Get just the usernames from leaders
-    leaders_usernames = [leader.username for leader in metric_leaders]
-    LOGGER.info("Creating group on Wise Old Man...")
-    group = await createGroup(leaders_usernames)
-    LOGGER.info("Updating all outdated group members...")
-    await updateGroup(group)
-    LOGGER.info("Deleting the group from Wise Old Man...")
-    await deleteGroup(group)
+    return metric_leaders
 
 
-    await session.close()
-    LOGGER.info("Scrape complete, exiting...")
+async def submit_updates(leaders: t.List[MetricLeader]) -> None:
+    client = wom.Client(user_agent=WOM_USER_AGENT)
+    await client.start()
+
+    if WOM_API_KEY:
+        client.set_api_key(WOM_API_KEY)
+
+    if ENABLE_SEASONAL:
+        client.set_api_base_url("https://api.wiseoldman.net/league")
+
+    try:
+        # Create the group
+        group = await Group.create(client, leaders)
+        await asyncio.sleep(1)
+
+        # Update the group members
+        await group.update()
+        await asyncio.sleep(1)
+
+        # Delete the group
+        await group.delete()
+    except Exception as e:
+        LOGGER.error(e)
+    finally:
+        await client.close()
+
+
+async def main() -> None:
     LOGGER.info("*" * 64)
+    LOGGER.info("WOM Leagues Scraper starting...")
 
+    session = ClientSession(headers={"User-Agent": BROWSER_USER_AGENT})
+    leaders = await fetch_all_leaders(session)
+    await session.close()
+    LOGGER.info("Scrape complete")
 
+    await submit_updates(leaders)
+    LOGGER.info("*" * 64)
 
 
 if __name__ == "__main__":
