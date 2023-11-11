@@ -1,13 +1,16 @@
+#!/usr/bin/env python3
+
 import abc
 import asyncio
 import logging
+import secrets
 import sys
 import typing as t
 from logging.handlers import RotatingFileHandler
 
+import wom
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup, Tag
-
 
 #########################################################
 # START Configuration
@@ -35,9 +38,21 @@ DELAY: t.Final[int] = 5
 """The number of seconds to delay between requests to the hiscores."""
 
 # fmt: off
-USER_AGENT: t.Final[str] = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
-"""The User-Agent to send with requests."""
+BROWSER_USER_AGENT: t.Final[str] = "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
+"""The user agent to send with requests to the hiscores."""
 # fmt: on
+
+WOM_API_KEY: t.Final[t.Optional[str]] = None
+"""The optional API Key for WOM."""
+
+LEADER_GROUP_NAME: t.Final[str] = f"League Leaders {secrets.token_hex(4)}"
+"""The name for the temporary group on WOM.
+
+Use secrets.token_hex to ensure the group name is not taken already.
+"""
+
+WOM_USER_AGENT: t.Final[str] = "WOM Leagues Scraper"
+"""The user agent to send with requests to the WOM API."""
 
 #########################################################
 # END Configuration
@@ -176,6 +191,96 @@ class NonSkillLeader(MetricLeader):
 
     def __str__(self) -> str:
         return f"{self.metric.name}: Rank {self.rank} -> {self.username} with score {self.score}"
+
+
+class Group:
+    def __init__(self, client: wom.Client, details: wom.GroupDetail) -> None:
+        self._details = details
+        self._client = client
+
+    @property
+    def members(self) -> t.List[wom.GroupMembership]:
+        """The members of this group."""
+        return self._details.memberships
+
+    @property
+    def name(self) -> str:
+        """The group name."""
+        return self._details.group.name
+
+    @property
+    def count(self) -> int:
+        """The amount of leaders in the group."""
+        return len(self._details.memberships)
+
+    @property
+    def id(self) -> int:
+        """The ID of the group on WOM."""
+        return self._details.group.id
+
+    @property
+    def verification_code(self) -> str:
+        """The verification cope of the group on WOM."""
+        return t.cast(str, self._details.verification_code)
+
+    def __str__(self) -> str:
+        return f"WOM Group {self.name} (id: {self.id}) with {self.count} members"
+
+    @classmethod
+    async def create(cls, client: wom.Client, members: t.List[MetricLeader]) -> "Group":
+        """Creates the group on WOM."""
+        LOGGER.info("Creating group")
+        result = await client.groups.create_group(
+            LEADER_GROUP_NAME, *(wom.GroupMemberFragment(m.username) for m in members)
+        )
+
+        if result.is_err:
+            LOGGER.error(result.unwrap_err())
+            raise wom.WomError("Exiting due to previous error")
+
+        group = cls(client, result.unwrap())
+        LOGGER.info(f"Created new {group}")
+        LOGGER.debug(f"Verification code: {group.verification_code}")
+        return group
+
+    async def update(self) -> None:
+        """Updates the group on WOM."""
+        LOGGER.info("Updating group members")
+        result = await self._client.groups.update_outdated_members(
+            self.id, self.verification_code
+        )
+
+        if result.is_err:
+            err = result.unwrap_err()
+
+            if "no outdated members" in err.message:
+                # If all participants are up to date WOM will return HTTP 400
+                # Any members that were previously untracked will have an update
+                # automatically run when the group is created with them as a member
+                # This is relevant because we just created this group, so we may
+                # have already sent an update request for all members at that time
+                LOGGER.info(err.message)
+                return None
+            else:
+                # Something else has gone wrong
+                # We don't raise an error here so the group still gets deleted
+                LOGGER.error(err)
+                return None
+
+        LOGGER.info(result.unwrap().message)
+
+    async def delete(self) -> None:
+        """Deletes the group from WOM."""
+        LOGGER.info("Deleting group")
+        result = await self._client.groups.delete_group(self.id, self.verification_code)
+
+        if result.is_err:
+            LOGGER.error(result.unwrap_err())
+            raise wom.WomError(
+                f"Group deletion failed, investigate group id: {self.id}"
+            )
+
+        LOGGER.info(f"Group deleted successfully")
 
 
 #########################################################
@@ -386,10 +491,7 @@ async def fetch_leaders(session: ClientSession, metric: Metric) -> t.List[Metric
     return parse_leaders(metric, rows)
 
 
-async def main() -> None:
-    LOGGER.info("*" * 64)
-    LOGGER.info("WOM Leagues Scraper starting...")
-    session = ClientSession(headers={"User-Agent": USER_AGENT})
+async def fetch_all_leaders(session: ClientSession) -> t.List[MetricLeader]:
     metric_limit = METRIC_LIMIT if METRIC_LIMIT else len(METRICS)
     metric_leaders: t.List[MetricLeader] = []
     is_unique: t.Callable[[MetricLeader], bool] = lambda l: not any(
@@ -401,6 +503,7 @@ async def main() -> None:
         LOGGER.info(f"Fetching leaders for {metric}")
 
         try:
+            # Fetch leaders in this metric
             leaders = await fetch_leaders(session, metric)
             LOGGER.info(f"Found {len(leaders)} leaders for {metric}")
 
@@ -408,6 +511,7 @@ async def main() -> None:
                 for leader in leaders:
                     LOGGER.debug(leader)
 
+            # Filter out players we have already seen
             leaders = list(filter(is_unique, leaders))
             LOGGER.info(f"Of those, {len(leaders)} were unique")
 
@@ -421,14 +525,46 @@ async def main() -> None:
                 LOGGER.info(f"Sleeping for {DELAY} seconds...")
                 await asyncio.sleep(DELAY)
 
-    # TODO: Make a few requests to WOM here with wom.py to
-    #   - Create a new group with all the metric leaders (store the verification code)
-    #   - Call the group update all endpoint (using the verification code)
-    #   - Delete the group (using the verification code)
-    # Use proper info/error logging during each of these steps
+    return metric_leaders
 
+
+async def submit_updates(leaders: t.List[MetricLeader]) -> None:
+    client = wom.Client(user_agent=WOM_USER_AGENT)
+    await client.start()
+
+    if WOM_API_KEY:
+        client.set_api_key(WOM_API_KEY)
+
+    if ENABLE_SEASONAL:
+        client.set_api_base_url("https://api.wiseoldman.net/league")
+
+    try:
+        # Create the group
+        group = await Group.create(client, leaders)
+        await asyncio.sleep(1)
+
+        # Update the group members
+        await group.update()
+        await asyncio.sleep(1)
+
+        # Delete the group
+        await group.delete()
+    except Exception as e:
+        LOGGER.error(e)
+    finally:
+        await client.close()
+
+
+async def main() -> None:
+    LOGGER.info("*" * 64)
+    LOGGER.info("WOM Leagues Scraper starting...")
+
+    session = ClientSession(headers={"User-Agent": BROWSER_USER_AGENT})
+    leaders = await fetch_all_leaders(session)
     await session.close()
-    LOGGER.info("Scrape complete, exiting...")
+    LOGGER.info("Scrape complete")
+
+    await submit_updates(leaders)
     LOGGER.info("*" * 64)
 
 
