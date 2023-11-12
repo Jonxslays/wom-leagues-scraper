@@ -420,7 +420,7 @@ def clean_username(username: str) -> str:
     return username.strip().replace("\\xa0", " ")
 
 
-def parse_leader(metric: Metric, row: tuple[str, ...]) -> MetricLeader:
+def parse_leader(metric: Metric, row: t.Tuple[str, ...]) -> MetricLeader:
     """Parses a metric leader out of a tuple of strings holding the necessary
     data points.
     """
