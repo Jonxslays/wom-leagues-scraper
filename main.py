@@ -475,8 +475,8 @@ def build_url(metric: Metric, page: int) -> str:
 #########################################################
 
 
-async def fetch_leaders(session: ClientSession, metric: Metric) -> t.List[MetricLeader]:
-    url = build_url(metric)
+async def fetch_leaders(session: ClientSession, metric: Metric, page: int = 1) -> t.List[MetricLeader]:
+    url = build_url(metric, page)
 
     # Fetch the hiscores data for this metric
     response = await session.get(url)
