@@ -91,7 +91,8 @@ async def find_last_players(session: ClientSession) -> t.List[MetricLeader]:
 
         last_players.append(last_player)
         last_pages[metric.name] = last_page_with_data
-        LOGGER.info(f"Found last page of {metric.name} at page {last_page_with_data} and last player: {last_player.username}.")
+        LOGGER.info(
+            f"Found last page of {metric.name} at page {last_page_with_data} and last player: {last_player.username}.")
 
     # Write last pages to file for use at next scrape
     data = json.dumps(last_pages, indent=4)
@@ -109,12 +110,11 @@ async def main() -> None:
     session = ClientSession(headers={"User-Agent": BROWSER_USER_AGENT})
     last_players = await find_last_players(session)
     await session.close()
-    
+
     LOGGER.info("Scrape complete")
 
     await submit_updates(last_players)
     LOGGER.info("*" * 64)
-    
 
 
 if __name__ == "__main__":
