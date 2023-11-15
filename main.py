@@ -458,9 +458,9 @@ def parse_leaders(metric: Metric, data: Tag) -> t.List[MetricLeader]:
     return [parse_leader(metric, row) for row in rows]
 
 
-def build_url(metric: Metric) -> str:
+def build_url(metric: Metric, page: int) -> str:
     """Builds the URL to use to fetch leaders for the given metric."""
-    params = {"category_type": metric.category, "table": metric.table}
+    params = {"category_type": metric.category, "table": metric.table, "page": page}
     query = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
     mode = "hiscore_oldschool"
 
