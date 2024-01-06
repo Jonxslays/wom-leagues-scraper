@@ -417,7 +417,7 @@ def clean_table_data(data: str) -> str:
 
 def clean_username(username: str) -> str:
     """Strips and replaces &nbsp; with a space."""
-    return username.strip().replace("\\xa0", " ")
+    return username.strip().replace(u"\xa0", " ")
 
 
 def parse_leader(metric: Metric, row: t.Tuple[str, ...]) -> MetricLeader:
