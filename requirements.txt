@@ -1,3 +1,3 @@
-aiohttp==3.8.6
-wom-py==0.8.1
+aiohttp==3.11.7
+wom-py==1.0.1
 beautifulsoup4==4.12.2
