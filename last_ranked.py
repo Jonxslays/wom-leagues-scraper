@@ -14,7 +14,7 @@ from main import fetch_leaders, BROWSER_USER_AGENT, DELAY, METRICS, LOGGER, Metr
 PAGE_SKIP = 1_000
 """ The amount of pages to skip when searching for new bounds """
 
-MAX_PAGE = 3_000
+MAX_PAGE = 20_000 # Last league ended with 14_184 pages.
 """ The absolute last possible page of any metric """
 
 LAST_PAGES_FILE = "last_pages.json"
@@ -23,6 +23,11 @@ LAST_PAGES_FILE = "last_pages.json"
 #########################################################
 # END Configuration
 #########################################################
+
+
+LEAGUES_ONLY: t.Final[t.List[Metric]] = [
+  Metric("League Points", 0, 1)
+]
 
 
 async def binary_search(session: ClientSession, metric: Metric, low: int = 1, high: int = MAX_PAGE) -> t.Tuple[int, str]:
@@ -73,7 +78,7 @@ async def find_last_players(session: ClientSession) -> t.List[MetricLeader]:
     # The players ranked last in each metric
     last_players: t.List[MetricLeader] = []
 
-    for metric in METRICS:
+    for metric in LEAGUES_ONLY:
         LOGGER.info(f"Finding last player for {metric.name}.")
 
         if metric.name in last_pages:
