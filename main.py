@@ -398,7 +398,7 @@ async def fetch_hiscore_players(session: ClientSession, metric: Metric, rank: in
 
     response = await session.get(url)
     if response.status != 200:
-        return
+        return []
     
     json_data = await response.json()
     hiscores_players = [
