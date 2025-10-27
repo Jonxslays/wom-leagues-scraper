@@ -398,6 +398,7 @@ async def fetch_hiscore_players(session: ClientSession, metric: Metric, rank: in
 
     response = await session.get(url)
     if response.status != 200:
+        LOGGER.debug(f"Error {response.status}: Failed to fetch hiscores for {metric.name} at rank {rank}.")
         return []
     
     json_data = await response.json()
