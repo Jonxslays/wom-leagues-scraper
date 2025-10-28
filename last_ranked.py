@@ -5,104 +5,108 @@ from aiohttp import ClientSession
 import typing as t
 import json
 from pathlib import Path
-from main import fetch_leaders, BROWSER_USER_AGENT, DELAY, METRICS, LOGGER, Metric, MetricLeader, submit_updates
+from main import fetch_hiscore_players, BROWSER_USER_AGENT, DELAY, LOGGER, PLAYERS_PER_PAGE, Metric, HiscorePlayer, submit_updates
 
 #########################################################
 # START Configuration
 #########################################################
 
-PAGE_SKIP = 1_000
-""" The amount of pages to skip when searching for new bounds """
+RANK_SKIP = 25_000
+""" The amount of ranks to skip when searching for new bounds """
 
-MAX_PAGE = 20_000 # Last league ended with 14_184 pages.
-""" The absolute last possible page of any metric """
+MAX_RANK = 2_000_000
+""" The absolute max rank of any metric """
 
-LAST_PAGES_FILE = "last_pages.json"
-""" The file where all previous last pages are stored """
+LAST_RANKS_FILE = "last_ranks.json"
+""" The file where all previous last ranks are stored """
 
 #########################################################
 # END Configuration
 #########################################################
 
 
-LEAGUES_ONLY: t.Final[t.List[Metric]] = [
-  Metric("League Points", 0, 1)
+NOT_ALL_METRICS: t.Final[t.List[Metric]] = [
+  Metric("Bryophyta", 26, 1) # TODO: Change this to sailing when it is released
 ]
 
 
-async def binary_search(session: ClientSession, metric: Metric, low: int = 1, high: int = MAX_PAGE) -> t.Tuple[int, str]:
-    """ Finds the last page and player for a hiscore metric using binary search """
+async def binary_search(session: ClientSession, metric: Metric, low: int = 0, high: int = MAX_RANK) -> t.Tuple[int, HiscorePlayer]:
+    """ Finds the last rank and player for a hiscore metric using binary search """
     _low = low
     _high = high
-    last_page_with_data = low
-    last_player: MetricLeader
+    last_player: HiscorePlayer
 
     while _low <= _high:
         mid = (_low + _high) // 2
-        board = await fetch_leaders(session, metric, mid)
+        board = await fetch_hiscore_players(session, metric, mid)
 
-        if board[0].rank != 1:
-            last_page_with_data = mid
+        # If the fetch didn't result in a 404
+        if board:
             last_player = board[-1]
             _low = mid + 1
+
+            # If the result contains less players than the amount of players per page
+            # we requested, it means we are on the last page.
+            if len(board) < PLAYERS_PER_PAGE:
+                break
         else:
             _high = mid - 1
 
         await asyncio.sleep(DELAY)
 
-    return last_page_with_data, last_player
+    return last_player
 
 
 async def new_bounds(session: ClientSession, metric: Metric, low: int) -> t.Tuple[int, int]:
     """ Finds new bounds to search within by using yesterday's bounds """
 
-    new_high = low + PAGE_SKIP
+    new_high = low + RANK_SKIP
     new_low = low
     while True:
-        board = await fetch_leaders(session, metric, new_high)
+        board = await fetch_hiscore_players(session, metric, new_high)
 
-        if board[0].rank == 1:
+        if not board:
             return (new_low, new_high)
         else:
-            new_high += PAGE_SKIP
-            new_low += PAGE_SKIP
+            new_high += RANK_SKIP
+            new_low += RANK_SKIP
 
 
-async def find_last_players(session: ClientSession) -> t.List[MetricLeader]:
-    if (Path(LAST_PAGES_FILE).is_file()):
-        with open(LAST_PAGES_FILE, "r") as f:
-            last_pages = json.load(f)
+async def find_last_players(session: ClientSession) -> t.List[HiscorePlayer]:
+    if (Path(LAST_RANKS_FILE).is_file()):
+        with open(LAST_RANKS_FILE, "r") as f:
+            last_ranks = json.load(f)
     else:
-        last_pages = {}
+        last_ranks = {}
 
     # The players ranked last in each metric
-    last_players: t.List[MetricLeader] = []
+    last_players: t.List[HiscorePlayer] = []
 
-    for metric in LEAGUES_ONLY:
+    for metric in NOT_ALL_METRICS:
         LOGGER.info(f"Finding last player for {metric.name}.")
 
-        if metric.name in last_pages:
-            last_page = last_pages[metric.name]
-            if last_page == MAX_PAGE:
-                last_page_with_data, last_player = await binary_search(session, metric, last_page)
+        if metric.name in last_ranks:
+            last_rank = last_ranks[metric.name]
+            if last_rank == MAX_RANK:
+                last_player = await binary_search(session, metric, last_rank)
                 last_players.append(last_player)
                 continue
 
-            low, high = await new_bounds(session, metric, last_page)
+            low, high = await new_bounds(session, metric, last_rank)
 
-            last_page_with_data, last_player = await binary_search(session, metric, low, high)
+            last_player = await binary_search(session, metric, low, high)
         else:
-            last_page_with_data, last_player = await binary_search(session, metric)
+            last_player = await binary_search(session, metric)
 
         last_players.append(last_player)
-        last_pages[metric.name] = last_page_with_data
+        last_ranks[metric.name] = last_player.rank
         LOGGER.info(
-            f"Found last page of {metric.name} at page {last_page_with_data} and last player: {last_player.username}.")
+            f"Found last ranked player, {last_player.name}, for {metric.name} on rank {last_player.rank}.")
 
-    # Write last pages to file for use at next scrape
-    data = json.dumps(last_pages, indent=4)
-    with open(LAST_PAGES_FILE, "w") as f:
-        LOGGER.info(f"Writing last pages to file...")
+    # Write last ranks to file for use at next scrape
+    data = json.dumps(last_ranks, indent=4)
+    with open(LAST_RANKS_FILE, "w") as f:
+        LOGGER.info(f"Writing last ranks to file...")
         f.write(data)
 
     return last_players
@@ -110,13 +114,13 @@ async def find_last_players(session: ClientSession) -> t.List[MetricLeader]:
 
 async def main() -> None:
     LOGGER.info("*" * 64)
-    LOGGER.info("WOM Leagues Last Page Scraper starting...")
+    LOGGER.info("WOM Leagues Last Rank Finder starting...")
 
     session = ClientSession(headers={"User-Agent": BROWSER_USER_AGENT})
     last_players = await find_last_players(session)
     await session.close()
 
-    LOGGER.info("Scrape complete")
+    LOGGER.info("Last rank finder complete")
 
     await submit_updates(last_players)
     LOGGER.info("*" * 64)
